@@ -22,6 +22,16 @@ function love.load()
     sprites.heart = love.graphics.newImage('sprites/heart.png')
     sprites.half_heart = love.graphics.newImage('sprites/half_heart.png')
     sprites.menu_background = love.graphics.newImage('sprites/menu_background.png')
+    -- Tentar carregar um background específico para a pista do caminhão (opcional)
+    if love.filesystem.getInfo('sprites/truck_background.png') then
+        sprites.truck_background = love.graphics.newImage('sprites/truck_background.png')
+    elseif love.filesystem.getInfo('sprites/truck_bg.png') then
+        sprites.truck_background = love.graphics.newImage('sprites/truck_bg.png')
+    elseif love.filesystem.getInfo('sprites/truck.png') then
+        sprites.truck_background = love.graphics.newImage('sprites/truck.png')
+    else
+        sprites.truck_background = nil
+    end
 
     -- Carregar todos os tipos de lixo
     sprites.lixos = {}
@@ -86,12 +96,40 @@ function love.load()
     POWERUP_DURATION_BASE = 10      
     
     gameState = "menu"
+
+    -- ================= FASES ADICIONAIS: SEPARAÇÃO E CAMINHÃO =================
+    -- Fase de separação (fila gerada a partir dos lixos capturados)
+    separation_queue = {}      -- lista de tipos (integers) para separar
+    separation_index = 1       -- item atual na fila
+    separation_cursor = 1      -- índice do lixeiro selecionado (1..5)
+    separation_points = 0      -- pontos ganhos apenas na separação
+    separated_items = {}       -- itens corretamente separados (serão colocados no caminhão)
+    bins = {                   -- posições das 5 categorias dentro da área de jogo
+        {name = "Plasticos"},
+        {name = "Vidros"},
+        {name = "Metais"},
+        {name = "Papeis"},
+        {name = "Organicos"}
+    }
+
+    -- Fase do caminhão
+    truck = { x = GAME_X_OFFSET, y = VIRTUAL_HEIGHT - 200, w = 160, h = 80, speed = 180, vy = 0, onGround = true }
+    truck_destination_x = GAME_X_OFFSET + GAME_WIDTH * 3 -- caminho mais longo
+    truck_obstacles = {}       -- obstáculos no caminho (retângulos)
+    truck_dropped = false      -- se algum lixeiro foi derrubado
+    truck.carried_bins = {}    -- itens empilhados no caminhão
+    truck.dropped_items = {}   -- itens que caíram do caminhão e caem na cena
+    separation_finished = false
 end
 
 -- ================= UPDATE =================
 function love.update(dt)
     if gameState == "playing" then
         updateGame(dt)
+    elseif gameState == "separation" then
+        updateSeparation(dt)
+    elseif gameState == "truck" then
+        updateTruck(dt)
     end
 end
 
@@ -137,7 +175,9 @@ function updateGame(dt)
             table.remove(lixos, i)
             if hearts <= 0 then
                 hearts = 0
-                gameState = "gameover"
+                -- Em vez de ir diretamente para gameover, vamos para a fase de separação
+                prepareSeparation()
+                gameState = "separation"
             end
         end
     end
@@ -161,6 +201,10 @@ function love.draw()
         drawMenu()
     elseif gameState == "playing" then
         drawGame()
+    elseif gameState == "separation" then
+        drawSeparation()
+    elseif gameState == "truck" then
+        drawTruck()
     elseif gameState == "gameover" then
         drawGameOver()
     end
@@ -500,6 +544,16 @@ end
 
 -- ================= CONTROLES =================
 function love.keypressed(key)
+    -- Controle rápido para a fase de separação (mover cursor)
+    if gameState == "separation" then
+        if key == "a" then
+            separation_cursor = math.max(1, separation_cursor - 1)
+            return
+        elseif key == "d" then
+            separation_cursor = math.min(#bins, separation_cursor + 1)
+            return
+        end
+    end
     if key == "space" then
         if gameState == "menu" then
             resetGame()
@@ -507,6 +561,20 @@ function love.keypressed(key)
         elseif gameState == "gameover" then
             resetGame()
             gameState = "playing"
+        elseif gameState == "separation" then
+            if separation_index <= #separation_queue then
+                attemptAssignCurrent()
+            else
+                -- fila vazia: avançar ao caminhão
+                prepareTruck()
+                gameState = "truck"
+            end
+        elseif gameState == "truck" then
+            -- pular
+            if truck.onGround then
+                truck.vy = -480
+                truck.onGround = false
+            end
         end
     
     -- Alterna tela cheia com F11
@@ -533,4 +601,272 @@ function resetGame()
     scoreMultiplier = 1 -- Zera o multiplicador no reset
     lixoSpawnRate = lixoSpawnRate_BASE -- Reverte a taxa de spawn
     for k in pairs(captured) do captured[k] = 0 end
+    -- Reset das fases adicionais
+    separation_queue = {}
+    separation_index = 1
+    separation_cursor = 1
+    separation_points = 0
+    truck_obstacles = {}
+    truck_dropped = false
+    separation_finished = false
+end
+
+-- ================= FASE: SEPARAÇÃO E CAMINHÃO (FUNÇÕES ADICIONAIS) =================
+
+function prepareSeparation()
+    -- Constrói a fila de itens a partir de 'captured'
+    separation_queue = {}
+    for tipo, qtd in pairs(captured) do
+        for i = 1, qtd do
+            table.insert(separation_queue, tipo)
+        end
+    end
+    separation_index = 1
+    separation_cursor = 3 -- começar no meio
+    separation_points = 0
+    separation_finished = false
+    truck_dropped = false
+    -- zera os contadores capturados (já estão guardados na fila)
+    for k in pairs(captured) do captured[k] = 0 end
+    separated_items = {}
+end
+
+-- Mapeamento simples: categoria = ((tipo - 1) % 5) + 1
+function getCategoryForTipo(tipo)
+    return ((tipo - 1) % 5) + 1
+end
+
+function updateSeparation(dt)
+    -- A separação é controlada por teclas (a/d para mover, espaço para confirmar)
+    -- mantemos vazio; entrada é tratada em love.keypressed
+end
+
+function drawSeparation()
+    drawBackground()
+    drawScore()
+    local x = GAME_X_OFFSET
+    local y = 80
+    love.graphics.setColor(1,1,1)
+    love.graphics.printf("FASE DE SEPARAÇÃO", x, y, GAME_WIDTH, "center")
+    y = y + 50
+
+    -- Desenha os lixeiros (bins)
+    local bin_w = 140
+    local spacing = (GAME_WIDTH - (bin_w * #bins)) / (#bins + 1)
+    for i, b in ipairs(bins) do
+        local bx = GAME_X_OFFSET + spacing * i + bin_w * (i - 1)
+        local by = VIRTUAL_HEIGHT - 260
+        b.x = bx
+        b.y = by
+        b.w = bin_w
+        b.h = 160
+        -- Destaque se selecionado
+        if separation_cursor == i then
+            love.graphics.setColor(0.2, 0.8, 0.2)
+        else
+            love.graphics.setColor(0.6, 0.6, 0.6)
+        end
+        love.graphics.rectangle("fill", bx, by, bin_w, 160)
+        love.graphics.setColor(0,0,0)
+        love.graphics.printf(b.name, bx, by + 70, bin_w, "center")
+    end
+
+    -- Mostra o item atual (se houver)
+    if separation_index <= #separation_queue then
+        local tipo = separation_queue[separation_index]
+        local sprite = sprites.lixos[tipo]
+        if sprite then
+            love.graphics.setColor(1,1,1)
+            local sx = 1.2
+            local imgW = sprite:getWidth() * sx
+            local imgH = sprite:getHeight() * sx
+            love.graphics.draw(sprite, GAME_X_OFFSET + (GAME_WIDTH - imgW)/2, VIRTUAL_HEIGHT/2 - imgH/2, 0, sx, sx)
+        else
+            love.graphics.setColor(1,1,1)
+            love.graphics.printf("Item: " .. tostring(tipo), GAME_X_OFFSET, VIRTUAL_HEIGHT/2 - 20, GAME_WIDTH, "center")
+        end
+        love.graphics.setColor(1,1,1)
+        love.graphics.printf("Use A/D para selecionar o lixeiro e ESPAÇO para descartar no lixeiro correto", GAME_X_OFFSET, VIRTUAL_HEIGHT/2 + 140, GAME_WIDTH, "center")
+    else
+        love.graphics.setColor(1,1,0)
+        love.graphics.printf("Separação concluída! Pressione ESPAÇO para continuar ao caminhão", GAME_X_OFFSET, VIRTUAL_HEIGHT/2, GAME_WIDTH, "center")
+    end
+end
+
+function attemptAssignCurrent()
+    if separation_index > #separation_queue then return end
+    local tipo = separation_queue[separation_index]
+    local chosen = separation_cursor
+    local correct = (getCategoryForTipo(tipo) == chosen)
+    if correct then
+        local pts = (lixoPoints[tipo] or 0)
+        separation_points = separation_points + pts
+        score = score + pts -- adiciona pontos imediatamente durante a fase 2
+        table.insert(separated_items, tipo)
+    end
+    separation_index = separation_index + 1
+    -- Quando terminar, preparar caminhão
+    if separation_index > #separation_queue then
+        separation_finished = true
+        prepareTruck()
+        gameState = "truck"
+    end
+end
+
+function prepareTruck()
+    -- configura obstáculos automáticos ao longo do caminho
+    truck.x = GAME_X_OFFSET
+    truck.y = VIRTUAL_HEIGHT - 200
+    truck.vy = 0
+    truck.onGround = true
+    truck_dropped = false
+    truck_obstacles = {}
+    truck.carried_bins = {}
+    truck.dropped_items = {}
+    -- coloca os itens separados no topo do caminhão com offsets
+    local slotW = truck.w / math.max(1, #separated_items)
+    for i, tipo in ipairs(separated_items) do
+        local off = 10 + (i-1) * slotW
+        table.insert(truck.carried_bins, { tipo = tipo, offx = off, offy = -30 })
+    end
+    -- cria muitos obstáculos ao longo de um caminho longo
+    local pathStart = GAME_X_OFFSET + 300
+    local pathEnd = truck_destination_x - 200
+    local pathLen = pathEnd - pathStart
+    local count = 12
+    for i = 1, count do
+        local t = (i-1) / (count-1)
+        local ox = pathStart + t * pathLen + math.random(-50,50)
+        local kind = (math.random() < 0.6) and "bump" or "ramp"
+        local o = { x = ox, y = VIRTUAL_HEIGHT - 160, w = 80, h = (kind=="bump") and 40 or 80, kind = kind }
+        table.insert(truck_obstacles, o)
+    end
+end
+
+function updateTruck(dt)
+    -- movimento automático para a direita; jogador pode pular com espaço (ver love.keypressed)
+    truck.x = truck.x + truck.speed * dt
+    -- aplicar gravidade
+    if not truck.onGround then
+        truck.vy = truck.vy + 1200 * dt
+        truck.y = truck.y + truck.vy * dt
+        if truck.y >= VIRTUAL_HEIGHT - 200 then
+            truck.y = VIRTUAL_HEIGHT - 200
+            truck.vy = 0
+            truck.onGround = true
+        end
+    end
+
+    -- checar colisões com obstáculos
+    for i = #truck_obstacles, 1, -1 do
+        local o = truck_obstacles[i]
+        if checkOverlap(truck.x, truck.y, truck.w, truck.h, o.x, o.y, o.w, o.h) then
+            -- se o caminhão está no chão e colidiu com obstáculo, os bins podem cair
+            if truck.onGround then
+                -- derrubar alguns ou todos os bins: para simplicidade, derruba todos
+                if #truck.carried_bins > 0 then
+                    for j = #truck.carried_bins, 1, -1 do
+                        local b = truck.carried_bins[j]
+                        -- cria item caindo
+                        table.insert(truck.dropped_items, { x = truck.x + b.offx, y = truck.y + b.offy, vx = math.random(-80,80), vy = -200, tipo = b.tipo })
+                        table.remove(truck.carried_bins, j)
+                    end
+                    truck_dropped = true
+                end
+            end
+            table.remove(truck_obstacles, i)
+        end
+    end
+
+    -- atualizar itens caindo
+    for i = #truck.dropped_items, 1, -1 do
+        local it = truck.dropped_items[i]
+        it.vy = it.vy + 1200 * dt
+        it.x = it.x + it.vx * dt
+        it.y = it.y + it.vy * dt
+        if it.y > VIRTUAL_HEIGHT then
+            table.remove(truck.dropped_items, i)
+        end
+    end
+
+    -- chegada
+    if truck.x >= truck_destination_x then
+        -- Se derrubou algum lixeiro, as pontuações de separação são perdidas
+        if truck_dropped then
+            -- não adiciona separation_points
+        else
+            score = score + separation_points
+        end
+        gameState = "gameover"
+    end
+end
+
+function drawTruck()
+    drawBackground()
+    drawScore()
+    -- câmera simples: segue o caminhão
+    local camX = math.max(0, truck.x - GAME_X_OFFSET - 200)
+
+    -- desenha o chão longo (ou background específico da pista se existir)
+    if sprites.truck_background then
+        -- desenha o background cobrindo a extensão do caminho
+        local bg = sprites.truck_background
+        local totalW = truck_destination_x - GAME_X_OFFSET + 400
+        local sx = totalW / bg:getWidth()
+        local sy = 220 / bg:getHeight()
+        love.graphics.setColor(1,1,1)
+        love.graphics.draw(bg, GAME_X_OFFSET - camX, VIRTUAL_HEIGHT - 220, 0, sx, sy)
+    else
+        love.graphics.setColor(0.25,0.25,0.25)
+        love.graphics.rectangle("fill", GAME_X_OFFSET - camX, VIRTUAL_HEIGHT - 220, truck_destination_x - GAME_X_OFFSET + 400, 220)
+    end
+
+    -- desenha obstáculos (com deslocamento da câmera)
+    for i,o in ipairs(truck_obstacles) do
+        local sx = o.x - camX
+        love.graphics.setColor((o.kind=="bump") and {0.6,0.1,0.1} or {0.2,0.4,0.1})
+        love.graphics.rectangle("fill", sx, o.y, o.w, o.h)
+    end
+
+    -- desenha o caminhão no mundo convertido para tela
+    local tx = truck.x - camX
+    love.graphics.setColor(0.2,0.6,0.9)
+    love.graphics.rectangle("fill", tx, truck.y, truck.w, truck.h)
+
+    -- desenha os bins empilhados no caminhão (usa o sprite do lixeiro como 'bin' se existir)
+    for i,b in ipairs(truck.carried_bins) do
+        local bx = tx + b.offx
+        local by = truck.y + b.offy
+        -- desenha o lixeiro (bin) como recipiente
+        if sprites.lixeiro then
+            local s = 0.9
+            love.graphics.setColor(1,1,1)
+            love.graphics.draw(sprites.lixeiro, bx, by - 10, 0, s, s)
+        else
+            love.graphics.setColor(0.6,0.6,0.6)
+            love.graphics.rectangle("fill", bx, by - 10, 36, 48)
+        end
+        -- desenha o lixo dentro do lixeiro (ícone menor)
+        local sprite = sprites.lixos[b.tipo]
+        if sprite then
+            love.graphics.setColor(1,1,1)
+            love.graphics.draw(sprite, bx + 8, by + 6, 0, 0.18, 0.18)
+        end
+    end
+
+    -- desenha itens caindo
+    for i,it in ipairs(truck.dropped_items) do
+        local sx = it.x - camX
+        local sprite = sprites.lixos[it.tipo]
+        if sprite then
+            love.graphics.draw(sprite, sx, it.y, 0, 0.25, 0.25)
+        else
+            love.graphics.setColor(1,0,0)
+            love.graphics.rectangle("fill", sx, it.y, 20, 20)
+        end
+    end
+
+    love.graphics.setColor(1,1,1)
+    love.graphics.printf("Caminhão: " .. (truck_dropped and "DERRUBOU ITENS!" or "Seguindo..."), GAME_X_OFFSET, 40, GAME_WIDTH, "center")
+    love.graphics.printf("Use ESPAÇO para pular obstáculos e manter os itens no caminhão", GAME_X_OFFSET, 70, GAME_WIDTH, "center")
 end
