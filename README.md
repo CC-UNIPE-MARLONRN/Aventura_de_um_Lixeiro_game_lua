@@ -1,0 +1,1 @@
+# Aventura_de_um_Lixeiro_game_lua
